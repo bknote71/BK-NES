@@ -53,6 +53,12 @@ void CPU::write(uint16_t address, uint8_t value)
 void CPU::execute()
 {
     uint8_t opcode = fetch();
+
+    // if (opcode != 0x00)
+    // {
+    //     std::cout << "Executing opcode: 0x" << std::hex << std::uppercase << +opcode << " " << pc << std::endl;
+    // }
+
     if (instructionSet.find(opcode) != instructionSet.end())
     {
         auto &instruction = instructionSet[opcode];
@@ -94,7 +100,7 @@ uint16_t CPU::fetchAddress(AddressMode mode)
     case AddressMode::Indirect: return read16(fetchAbsolute());
     case AddressMode::IndexedIndirect: return read16(fetchZeroPage(x), true);
     case AddressMode::IndirectIndexed: return read16(fetchZeroPage(), true) + y;
-    case AddressMode::Relative: return pc + static_cast<int8_t>(read(pc++));
+    case AddressMode::Relative: return pc + 1 + static_cast<int8_t>(read(pc++));
     default: throw std::runtime_error("Unknown addressing mode");
     }
 }
@@ -571,8 +577,8 @@ void CPU::JMP(uint16_t address)
 
 void CPU::JSR(uint16_t address)
 {
-    write(0x100 + sp--, (pc + 1) >> 8);
-    write(0x100 + sp--, (pc + 1) & 0xFF);
+    write(0x100 + sp--, (pc - 1) >> 8);
+    write(0x100 + sp--, (pc - 1) & 0xFF);
     pc = address;
 }
 
@@ -583,8 +589,8 @@ void CPU::RTS()
 
 void CPU::BRK()
 {
-    write(0x100 + sp--, (pc + 1) >> 8);
-    write(0x100 + sp--, (pc + 1) & 0xFF);
+    write(0x100 + sp--, (pc - 1) >> 8);
+    write(0x100 + sp--, (pc - 1) & 0xFF);
     write(0x100 + sp--, stat | (1 << 4) | (1 << 5));
     pc = read(0xFFFE) | (read(0xFFFF) << 8);
     SET_FLAG(stat, FLAG_INTERRUPT, true);
@@ -667,3 +673,14 @@ void CPU::CLV()
 
 // Other
 void CPU::NOP() {}
+
+// Debug
+void CPU::debugStack()
+{
+    std::cout << "SP: 0x" << std::hex << +sp << std::endl;
+    for (uint16_t i = sp + 1; i <= 0xFF; ++i)
+    {
+        std::cout << "Stack[0x" << std::hex << (0x100 + i) << "] = 0x" << +memory[0x100 + i] << "\n";
+    }
+    std::cout << "-----------------------------" << std::endl;
+}

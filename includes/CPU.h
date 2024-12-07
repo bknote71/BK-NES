@@ -35,7 +35,7 @@ public:
     uint8_t a = 0x00;  // Accumulator
     uint8_t x = 0x00;  // X Register
     uint8_t y = 0x00;  // Y Register
-    uint8_t sp = 0x00; // Stack Pointer
+    uint8_t sp = 0xFF; // Stack Pointer
 
     uint8_t stat = 0x00;  // Processor Status Register
     uint16_t pc = 0x0000; // Program Counter
@@ -135,6 +135,9 @@ public:
 
     // Other
     void NOP();
+
+    /* debug */
+    void debugStack();
 };
 
 #endif

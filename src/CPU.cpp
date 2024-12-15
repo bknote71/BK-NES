@@ -104,6 +104,7 @@ uint16_t CPU::fetchAddress(AddressMode mode)
     default: throw std::runtime_error("Unknown addressing mode");
     }
 }
+
 void CPU::setZNFlag(uint8_t value)
 {
     SET_FLAG(stat, FLAG_ZERO, value == 0);
@@ -589,8 +590,8 @@ void CPU::RTS()
 
 void CPU::BRK()
 {
-    write(0x100 + sp--, (pc - 1) >> 8);
-    write(0x100 + sp--, (pc - 1) & 0xFF);
+    write(0x100 + sp--, (pc + 1) >> 8);
+    write(0x100 + sp--, (pc + 1) & 0xFF);
     write(0x100 + sp--, stat | (1 << 4) | (1 << 5));
     pc = read(0xFFFE) | (read(0xFFFF) << 8);
     SET_FLAG(stat, FLAG_INTERRUPT, true);

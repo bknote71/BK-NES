@@ -2,6 +2,7 @@
 #define PPU_H
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 enum PipelineState
@@ -9,6 +10,7 @@ enum PipelineState
     PreRender,
     VisibleRender,
     PostRender,
+    VBlank,
 };
 
 /**
@@ -40,7 +42,7 @@ public:
     // PPUSTATUS
     bool spriteOverflow;
     bool sprZeroHit; // 특정 픽셀에서 스프라이트0과 배경이 겹치면 set.
-    bool vblank;
+    bool vblankFlag;
 
     // OAM
     uint8_t oamAddr; // 스프라이트 evaluation 시작 주소
@@ -50,9 +52,9 @@ public:
 
     // Internal registers
     uint16_t v; // [14-12]: fine Y, [11-10]: nametable, [9-5]: coarseY(타일 y축 위치), [4-0]: coarseX(타일 x축 위치)
-    uint16_t t;
-    uint8_t x; // fine X scroll
-    bool w;    // first or second write toggle
+    uint16_t t; // for setting scroll value
+    uint8_t x;  // fine X scroll
+    bool w;     // first or second write toggle
 
     uint32_t cycle;
     uint32_t scanline;
@@ -67,12 +69,21 @@ public:
     std::vector<uint8_t> palette;
     std::vector<std::vector<uint32_t>> pBuffer;
 
+    // vblank
+    std::function<void(void)> vblankNMI;
+
     // methods
 
-    // set IORegisters (called by CPU)
+    // IORegisters (called by CPU)
     void setPPUCtrl(uint8_t ctrl);
     void setPPUMask(uint8_t mask);
     void setOAMAddr(uint8_t oamAddr);
+    void setOAMData(uint8_t data);
+    void setPPUSCroll(uint8_t scroll);
+    void setPPUAddr(uint8_t addr);
+    void setPPUData(uint8_t data);
+
+    uint8_t getPPUStatus();
 
     uint8_t read(uint16_t address);
 
@@ -80,6 +91,7 @@ public:
     void preRender();
     void visibleRender();
     void postRender();
+    void vblank();
 
     void renderPixel();
     void renderBackgroundPixel(uint8_t &bgPixel, bool &bgOpaque);
@@ -108,6 +120,7 @@ public:
     void incrementHoriV();
     void incrementVertV();
     void resetHorizontalScroll();
+    void resetVerticalScroll();
 };
 
 #endif

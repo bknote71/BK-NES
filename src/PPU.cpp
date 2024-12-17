@@ -41,13 +41,55 @@ void PPU::setOAMAddr(uint8_t oamAddr)
     this->oamAddr = oamAddr;
 }
 
+void PPU::setPPUSCroll(uint8_t scroll)
+{
+    if (!w) // set (coarseX and fineX) of t
+    {
+        t &= ~0x1f;
+        t |= (scroll >> 3) & 0x1F;
+        x = scroll & 0x07;
+        w = 1;
+    }
+    else // set coarseY of t
+    {
+        // FGH..AB CDE..... <- d: ABCDEFGH (scroll)
+        t &= ~0x73e0;
+        t |= ((scroll & 0x07) << 12) | ((scroll & 0xF8) << 2);
+        w = 0;
+    }
+}
+
+void PPU::setPPUAddr(uint8_t addr)
+{
+    if (!w) // t의 상위 8비트 세팅 (0_CDEFGH)
+    {
+        t &= ~0xFF00;
+        t |= (addr & 0x3F) << 8;
+        w = 1;
+    }
+    else // t의 하위 8비트 세팅 및 v에 쓰기
+    {
+        t &= ~0xFF;
+        t |= addr;
+        v = t;
+        w = 0;
+    }
+}
+
+uint8_t PPU::getPPUStatus()
+{
+    vblankFlag = 0;
+}
+
+// rendering
 void PPU::render()
 {
     switch (pipelineState)
     {
     case PreRender: preRender(); break;
     case VisibleRender: visibleRender(); break;
-
+    case PostRender: postRender(); break;
+    case VBlank: vblank(); break;
     default: break;
     }
     ++cycle;
@@ -56,11 +98,24 @@ void PPU::render()
 void PPU::preRender()
 {
     if (cycle == 1)
-    {
-        clearFlags();
+    { // clear flags
+        vblankFlag = false;
+        sprZeroHit = false;
+        spriteOverflow = false;
     }
-
-    // TODO
+    // 1 ~ 256: unused tile fetch
+    else if (cycle == visibleCycle + 1)
+        resetHorizontalScroll();
+    else if (280 == cycle) // 280-304
+        resetVerticalScroll();
+    else if (cycle == 321)
+        loadBgShiftersForNextScanline();
+    else if (cycle >= endCycle - (oddFrame))
+    {
+        pipelineState = VisibleRender;
+        cycle = -1;
+        scanline = 0;
+    }
 }
 
 void PPU::visibleRender()
@@ -89,6 +144,38 @@ void PPU::visibleRender()
     }
 }
 
+void PPU::postRender()
+{
+    if (cycle < endCycle)
+        return;
+
+    cycle = -1;
+    pipelineState = VBlank;
+
+    // virtual screen?
+}
+
+void PPU::vblank()
+{
+    if (cycle == 1 && scanline == 241)
+    {
+        vblankFlag = true;
+        if (enableVblankNMI)
+            vblankNMI();
+    }
+
+    if (cycle >= endCycle)
+    {
+        cycle = -1;
+
+        if (++scanline >= 261)
+        {
+            pipelineState = PreRender;
+            oddFrame = !oddFrame;
+        }
+    }
+}
+
 void PPU::renderPixel()
 {
     if (scanline == 0 && cycle <= 16)
@@ -111,17 +198,9 @@ void PPU::renderPixel()
 
     if (enableBgRendering)
     {
-        // int fine_x = (this->x + x) & 0x07;
-
-        // if (x > 7) // (cycle 9이상일 때부터) 1사이클 당 1픽셀 출력 가능
-        // renderBackgroundPixel(fine_x, y, bgPixel, bgOpaque);
         renderBackgroundPixel(bgPixel, bgOpaque);
 
-        // if (fine_x == 7)
-        //     incrementHoriV();
-
-        // 8픽셀 마다 다음 타일 데이터를 쉬프터에 로드
-        if (x % 8 == 7)
+        if ((x + this->x) % 8 == 7) // 8픽셀 마다 다음 타일 데이터를 쉬프터에 로드
         {
             loadNextTileIntoShifters();
         }
@@ -265,13 +344,13 @@ uint8_t PPU::fetchAttributeTableData(int tileX = -1, int tileY = -1)
     int x = (tileX != -1) ? tileX : v & 0x001F;
     int y = (tileY != -1) ? tileY : (v >> 5) & 0x001F;
 
-    int attrX = x / 4;
-    int attrY = y / 4;
+    int attrX = x >> 2;
+    int attrY = y >> 2;
 
     uint16_t blockAddr = attrBase + (attrY * 8) + attrX;
     uint8_t attrData = read(blockAddr);
 
-    int shift = ((x % 4) / 2 + (y % 4) / 2 * 2) * 2;
+    int shift = (((x & 0x02) >> 1) + ((y & 0x02) >> 1) * 2) * 2;
     uint8_t paletteIdx = (attrData >> shift) & 0x03;
     return paletteIdx;
 }
@@ -293,6 +372,8 @@ void PPU::loadBgShiftersForNextScanline()
 
     bgShifterLow = (ptLow1 << 8) | ptLow2;
     bgShifterHigh = (ptHigh1 << 8) | ptHigh2;
+    bgShifterLow <<= this->x;
+    bgShifterHigh <<= this->x;
 
     uint8_t paletteIdx1 = fetchAttributeTableData(0, fineY) & 0x03;
     uint8_t paletteIdx2 = fetchAttributeTableData(1, fineY) & 0x03;
@@ -392,9 +473,16 @@ void PPU::incrementVertV()
 }
 
 void PPU::resetHorizontalScroll()
-{
+{ // reset coarse X, nametable 10(hori)
+
     v &= ~0x041F;
     v |= t & 0x041F;
+}
+
+void PPU::resetVerticalScroll()
+{ // reset coarse Y(5-9), nametable 11(vert), fine Y(14-12)
+    v &= ~0x7BE0;
+    v |= t & 0x7BE0;
 }
 
 // 1픽셀 씩 로드하는 방법

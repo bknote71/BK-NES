@@ -22,7 +22,7 @@ class PPU
 public:
     // PPUCTRL
     uint16_t baseNTAddr;  // 베이스 네임테이블주소 (0, 1, 2, 3)
-    bool vIncrement;      //
+    uint8_t vIncrement;   // vram 주소 증가량 (0: 1, 1: 32)
     uint16_t sprPTAddr;   // 스프라이트 패턴테이블 주소 (0: $0000, 1: $1000) (8x8 일때 유효)
     uint16_t bgPTAddr;    // 배경 패턴 테이블 주소 (0: $0000, 1: $1000)
     uint8_t sprSize;      // 스프라이트 크기 (0: 8x8, 1: 8x16)
@@ -42,6 +42,12 @@ public:
     bool sprZeroHit; // 특정 픽셀에서 스프라이트0과 배경이 겹치면 set.
     bool vblank;
 
+    // OAM
+    uint8_t oamAddr; // 스프라이트 evaluation 시작 주소
+    std::vector<uint32_t> oam;
+    std::vector<uint8_t> soam;
+    std::vector<uint8_t> sprShifters;
+
     // Internal registers
     uint16_t v; // [14-12]: fine Y, [11-10]: nametable, [9-5]: coarseY(타일 y축 위치), [4-0]: coarseX(타일 x축 위치)
     uint16_t t;
@@ -52,18 +58,23 @@ public:
     uint32_t scanline;
     bool oddFrame;
 
-    PipelineState pipelineState;
+    uint16_t bgShifterLow;
+    uint16_t bgShifterHigh;
+    uint8_t bgPaletteShifter;
 
-    std::vector<uint32_t> oam;
-    std::vector<uint8_t> secondaryOAM; // 16개
+    PipelineState pipelineState;
 
     std::vector<uint8_t> palette;
     std::vector<std::vector<uint32_t>> pBuffer;
 
     // methods
-    uint8_t read(uint16_t address);
+
+    // set IORegisters (called by CPU)
     void setPPUCtrl(uint8_t ctrl);
     void setPPUMask(uint8_t mask);
+    void setOAMAddr(uint8_t oamAddr);
+
+    uint8_t read(uint16_t address);
 
     void render();
     void preRender();
@@ -71,18 +82,24 @@ public:
     void postRender();
 
     void renderPixel();
-    void renderBackgroundPixel(int x, int y, uint8_t &bgPixel, bool &bgOpaque);
+    void renderBackgroundPixel(uint8_t &bgPixel, bool &bgOpaque);
     void renderSpritePixel(int x, int y, bool bgOpaque, uint8_t &sprPixel, bool &sprOpaque, bool &sprForeground);
     uint8_t compositePixel(int x, int y, uint8_t bgPixel, uint8_t sprPixel, bool bgOpaque, bool sprOpaque, bool sprForeground);
 
     void clearFlags();
-    uint8_t fetchNameTableData();
-    uint8_t fetchAttributeTableData();
+
+    // fetch
     uint8_t fetchPatternTablePixelData(uint16_t ptAddr, uint8_t tileX);
+    uint8_t fetchNameTableData();
+    uint8_t fetchAttributeTableData(int tileX = -1, int tileY = -1);
+
     uint8_t fetchPatternTableLow(uint8_t tile, uint8_t tileX);
     uint8_t fetchPatternTableHigh(uint8_t tile, uint8_t tileX);
 
-    void evaluateSprites();
+    void loadBgShiftersForNextScanline();
+    void loadNextTileIntoShifters();
+
+    void evaluateSprites(int y);
     void fetchSpriteTitleByte();
     void fetchSpriteAttributeByte();
     void fetchSpritePatternLow();

@@ -1,7 +1,8 @@
 #include "PPU.h"
 
 static const int visibleCycle = 256;
-static const int endCycle = 256;
+static const int endCycle = 340;
+static const int visibleScanlines = 240;
 
 // temp
 static const uint32_t colors[] = {
@@ -13,10 +14,12 @@ static const uint32_t colors[] = {
     0xf7d8a5ff, 0xe4e594ff, 0xcfef96ff, 0xbdf4abff, 0xb3f3ccff, 0xb5ebf2ff, 0xb8b8b8ff, 0x000000ff, 0x000000ff,
 };
 
+// set IORegisters (called by CPU)
+
 void PPU::setPPUCtrl(uint8_t ctrl)
 {
     baseNTAddr = 0x2000 + ((ctrl & 0x03) << 10);
-    vIncrement = ctrl & 0x04;
+    vIncrement = (ctrl & 0x04) ? 32 : 1;
     sprPTAddr = ((ctrl >> 3) & 0x01) << 12;
     bgPTAddr = ((ctrl >> 4) & 0x01) << 12;
     sprSize = (ctrl & 0x20) ? 16 : 8;
@@ -31,6 +34,11 @@ void PPU::setPPUMask(uint8_t mask)
     enableBgRendering = mask & 0x08;
     enableSprRendering = mask & 0x10;
     emphasizeRGB = (mask >> 5) & 0x07;
+}
+
+void PPU::setOAMAddr(uint8_t oamAddr)
+{
+    this->oamAddr = oamAddr;
 }
 
 void PPU::render()
@@ -65,10 +73,32 @@ void PPU::visibleRender()
         renderPixel();
     else if (cycle == visibleCycle + 1)
         resetHorizontalScroll();
+    else if (cycle == visibleCycle + 2)
+    {
+        sprShifters = soam;
+    }
+    else if (cycle == 321) // 321 ~ 336
+    {
+        loadBgShiftersForNextScanline();
+    }
+    else if (cycle >= endCycle)
+    {
+        cycle = -1;
+        if (++scanline >= visibleScanlines)
+            pipelineState = PostRender;
+    }
 }
 
 void PPU::renderPixel()
 {
+    if (scanline == 0 && cycle <= 16)
+    {
+        // 16이 될 때까지 그리지 않음
+        if (cycle == 16)
+            loadBgShiftersForNextScanline();
+        return;
+    }
+
     uint8_t bgPixel = 0;
     uint8_t sprPixel = 0;
 
@@ -81,15 +111,23 @@ void PPU::renderPixel()
 
     if (enableBgRendering)
     {
-        int fine_x = (this->x + x) & 0x07;
-        if (x > 7) // (cycle 9이상일 때부터) 1사이클 당 1픽셀 출력 가능
-            renderBackgroundPixel(fine_x, y, bgPixel, bgOpaque);
+        // int fine_x = (this->x + x) & 0x07;
 
-        if (fine_x == 7)
-            incrementHoriV();
+        // if (x > 7) // (cycle 9이상일 때부터) 1사이클 당 1픽셀 출력 가능
+        // renderBackgroundPixel(fine_x, y, bgPixel, bgOpaque);
+        renderBackgroundPixel(bgPixel, bgOpaque);
+
+        // if (fine_x == 7)
+        //     incrementHoriV();
+
+        // 8픽셀 마다 다음 타일 데이터를 쉬프터에 로드
+        if (x % 8 == 7)
+        {
+            loadNextTileIntoShifters();
+        }
     }
 
-    if (enableSprRendering && x > 7)
+    if (enableSprRendering) //  && x > 7
     {
         renderSpritePixel(x, y, bgOpaque, sprPixel, sprOpaque, sprForeground);
     }
@@ -97,18 +135,30 @@ void PPU::renderPixel()
     // palette의 idx (< 32)
     uint8_t pixel = compositePixel(x, y, bgPixel, sprPixel, bgOpaque, sprOpaque, sprForeground);
     pBuffer[x][y] = colors[palette[pixel]];
+
+    // sprite evaluation
+    if (cycle == 65)
+        evaluateSprites(y);
+
+    if (cycle == visibleCycle)
+        incrementVertV();
 }
 
-void PPU::renderBackgroundPixel(int x, int y, uint8_t &bgPixel, bool &bgOpaque)
+void PPU::renderBackgroundPixel(uint8_t &bgPixel, bool &bgOpaque)
 {
-    uint8_t tile = fetchNameTableData();
-    uint8_t palette = fetchAttributeTableData();
-    uint8_t ptLow = fetchPatternTableLow(tile, x);
-    uint8_t ptHigh = fetchPatternTableHigh(tile, x);
-    uint8_t tilePixel = (ptHigh << 1 | ptLow) & 0x03;
+    // TODO: fineX 적용하기 (픽셀 단위 스크롤)
+    // - 읽을 때 (7 - (x + this->x(fineX)) % 8) 값 위치를 읽어야 한다.
+    uint8_t bgPixelLow = (bgShifterLow & 0x8000) ? 1 : 0;
+    uint8_t bgPixelHigh = (bgShifterHigh & 0x8000) ? 1 : 0;
+    uint8_t paletteIdx = (bgPaletteShifter & 0x0C) >> 2;
 
-    bgPixel = ((palette & 0x03) << 2) | tilePixel;
-    bgOpaque = bgPixel != 0;
+    bgPixel = (bgPixelHigh << 1) | bgPixelLow;
+    bgPixel = (paletteIdx << 2) | bgPixel;
+    bgOpaque = (bgPixel != 0);
+
+    // shift
+    bgShifterLow <<= 1;
+    bgShifterHigh <<= 1;
 }
 
 void PPU::renderSpritePixel(int x, int y, bool bgOpaque, uint8_t &sprPixel, bool &sprOpaque, bool &sprForeground)
@@ -120,20 +170,20 @@ void PPU::renderSpritePixel(int x, int y, bool bgOpaque, uint8_t &sprPixel, bool
      * - [15:8]  타일번호(tile)
      * - [7:0]   Y좌표
      */
-    for (uint8_t sprIdx : secondaryOAM)
+    for (uint8_t sprIdx : sprShifters)
     {
         uint32_t spr = oam[sprIdx];
-        uint8_t spry = (uint8_t)((spr >> 0) & 0xFF);
-        uint8_t tile = (uint8_t)((spr >> 8) & 0xFF);
-        uint8_t attr = (uint8_t)((spr >> 16) & 0xFF);
-        uint8_t sprx = (uint8_t)((spr >> 24) & 0xFF);
+        uint8_t spry = static_cast<uint8_t>((spr >> 0) & 0xFF);
+        uint8_t tile = static_cast<uint8_t>((spr >> 8) & 0xFF);
+        uint8_t attr = static_cast<uint8_t>((spr >> 16) & 0xFF);
+        uint8_t sprx = static_cast<uint8_t>((spr >> 24) & 0xFF);
 
         int xOffset = x - sprx;
         int yOffset = y - spry;
 
         if (xOffset < 0 || xOffset > 7)
             continue;
-        if (yOffset < 0 || yOffset > sprSize)
+        if (yOffset < 0 || yOffset >= sprSize)
             continue;
 
         bool flipVertical = attr & 0x80;
@@ -155,7 +205,7 @@ void PPU::renderSpritePixel(int x, int y, bool bgOpaque, uint8_t &sprPixel, bool
         // fetch pt low-plain / high-plain
         uint8_t pixel = fetchPatternTablePixelData(tilePTAddr, tileX);
 
-        if (!(sprOpaque = sprPixel))
+        if (!(sprOpaque = (pixel != 0)))
             continue;
 
         sprPixel = 0x10 | (paletteIdx << 2) | (pixel & 0x03);
@@ -180,26 +230,12 @@ uint8_t PPU::compositePixel(int x, int y, uint8_t bgPixel, uint8_t sprPixel, boo
         return sprPixel;
 
     if (bgOpaque && !sprOpaque)
-        return bgOpaque;
+        return bgPixel;
 
     if (sprForeground)
         return sprPixel;
+
     return bgPixel;
-}
-
-uint8_t PPU::fetchNameTableData()
-{
-    uint16_t ntAddr = 0x2000 | (v & 0x0FFF);
-    return read(ntAddr);
-}
-
-uint8_t PPU::fetchAttributeTableData()
-{
-    uint16_t attrBase = 0x23C0 | (v & 0x0C00);
-    uint16_t coarseY = (v >> 5) & 0x001F; // attrtable에서의 타일 y축 위치 (32(30)개를 8개에 매핑. 즉 상위 3개비트만)
-    uint16_t coarseX = v & 0x001F;        // attrtable에서의 타일 x축 위치 (32개를 8개에 매핑. 즉 상위 3개비트만)
-    uint16_t atAddr = attrBase | ((coarseY & 0x001C) << 1) | ((coarseX >> 2) & 0x07);
-    return read(atAddr);
 }
 
 /*
@@ -217,18 +253,93 @@ uint8_t PPU::fetchPatternTablePixelData(uint16_t ptAddr, uint8_t tileX)
     return (highBit << 1) | lowBit;
 }
 
-uint8_t PPU::fetchPatternTableLow(uint8_t tile, uint8_t tileX)
+uint8_t PPU::fetchNameTableData()
 {
-    uint16_t fineY = (v >> 12) & 0x07;
-    uint16_t ptAddr = bgPTAddr + tile * 16 + fineY;
-    return (read(ptAddr) >> (7 - tileX)) & 0x01;
+    uint16_t ntAddr = 0x2000 | (v & 0x0FFF);
+    return read(ntAddr);
 }
 
-uint8_t PPU::fetchPatternTableHigh(uint8_t tile, uint8_t tileX)
+uint8_t PPU::fetchAttributeTableData(int tileX = -1, int tileY = -1)
 {
-    uint16_t fineY = (v >> 12) & 0x07;
-    uint16_t ptAddr = bgPTAddr + tile * 16 + fineY + 8;
-    return (read(ptAddr) >> (7 - tileX)) & 0x01;
+    uint16_t attrBase = 0x23C0 | (v & 0x0C00);
+    int x = (tileX != -1) ? tileX : v & 0x001F;
+    int y = (tileY != -1) ? tileY : (v >> 5) & 0x001F;
+
+    int attrX = x / 4;
+    int attrY = y / 4;
+
+    uint16_t blockAddr = attrBase + (attrY * 8) + attrX;
+    uint8_t attrData = read(blockAddr);
+
+    int shift = ((x % 4) / 2 + (y % 4) / 2 * 2) * 2;
+    uint8_t paletteIdx = (attrData >> shift) & 0x03;
+    return paletteIdx;
+}
+
+void PPU::loadBgShiftersForNextScanline()
+{
+    uint8_t fineY = (v >> 12) & 0x07;
+    uint8_t tile1 = fetchNameTableData();
+    uint8_t tile2 = tile1 + 1;
+
+    // uint8_t palette = fetchAttributeTableData();
+    uint16_t tile1Addr = bgPTAddr + tile1 * 16 + fineY;
+    uint16_t tile2Addr = bgPTAddr + tile2 * 16 + fineY;
+
+    uint8_t ptLow1 = read(tile1Addr);
+    uint8_t ptHigh1 = read(tile1Addr + 8);
+    uint8_t ptLow2 = read(tile2Addr);
+    uint8_t ptHigh2 = read(tile2Addr + 8);
+
+    bgShifterLow = (ptLow1 << 8) | ptLow2;
+    bgShifterHigh = (ptHigh1 << 8) | ptHigh2;
+
+    uint8_t paletteIdx1 = fetchAttributeTableData(0, fineY) & 0x03;
+    uint8_t paletteIdx2 = fetchAttributeTableData(1, fineY) & 0x03;
+
+    bgPaletteShifter = (paletteIdx1 << 2) | paletteIdx2;
+
+    // increment hori v 2번
+    incrementHoriV();
+    incrementHoriV();
+}
+
+void PPU::loadNextTileIntoShifters()
+{
+    uint8_t tile = fetchNameTableData();
+    uint8_t paletteIdx = fetchAttributeTableData() & 0x03;
+    uint16_t tileAddr = bgPTAddr + tile * 16 + (v >> 12) & 0x07;
+
+    uint8_t ptLow = read(tileAddr);
+    uint8_t ptHigh = read(tileAddr + 8);
+
+    bgShifterLow |= ptLow;
+    bgShifterHigh |= ptHigh;
+    bgPaletteShifter = (bgPaletteShifter << 2) | paletteIdx;
+
+    incrementHoriV();
+}
+
+void PPU::evaluateSprites(int y)
+{
+    soam.resize(0);
+    uint8_t cnt = 0;
+    for (uint8_t sprIdx = oamAddr / 4; sprIdx < 64; ++sprIdx)
+    {
+        uint8_t spry = static_cast<uint8_t>(oam[sprIdx] & 0xFF);
+        int yOffset = y - spry;
+
+        if (yOffset < 0 || yOffset >= sprSize)
+            continue;
+
+        if (cnt >= 8)
+        {
+            spriteOverflow = true;
+            break;
+        }
+        soam.push_back(sprIdx);
+        ++cnt;
+    }
 }
 
 /*
@@ -242,14 +353,42 @@ uint8_t PPU::fetchPatternTableHigh(uint8_t tile, uint8_t tileX)
  */
 void PPU::incrementHoriV()
 {
-    if (v & 0x001F == 0x001F)
+    if ((v & 0x001F) != 0x001F)
     {
-        v &= ~0x001F;
-        v ^= 0x0400;
+        v += 1;
         return;
     }
 
-    v += 1;
+    v &= ~0x001F;
+    v ^= 0x0400;
+}
+
+void PPU::incrementVertV()
+{
+    // Fine Y (bits 12-14)가 최대값(7)이 아닌 경우 Fine Y를 증가시킴
+    if ((v & 0x7000) != 0x7000)
+    {
+        v += 0x1000;
+        return;
+    }
+
+    v &= ~0x7000;
+    uint16_t coarseY = (v & 0x03E0) >> 5; // Coarse Y (bits 5-9)를 추출
+
+    if (coarseY == 29)
+    {
+        v &= ~0x03E0;
+        v ^= 0x0800; // 수직 네임테이블 비트 토글
+    }
+    else if (coarseY == 31)
+    {
+        v &= ~0x03E0;
+    }
+    else
+    {
+        coarseY += 1;
+        v = (v & ~0x03E0) | (coarseY << 5);
+    }
 }
 
 void PPU::resetHorizontalScroll()
@@ -257,3 +396,30 @@ void PPU::resetHorizontalScroll()
     v &= ~0x041F;
     v |= t & 0x041F;
 }
+
+// 1픽셀 씩 로드하는 방법
+// void PPU::renderBackgroundPixel(int x, int y, uint8_t &bgPixel, bool &bgOpaque)
+// {
+//     uint8_t tile = fetchNameTableData();
+//     uint8_t paletteIdx = fetchAttributeTableData();
+//     uint8_t ptLow = fetchPatternTableLow(tile, x);
+//     uint8_t ptHigh = fetchPatternTableHigh(tile, x);
+//     uint8_t tilePixel = (ptHigh << 1 | ptLow) & 0x03;
+
+//     bgPixel = ((paletteIdx & 0x03) << 2) | tilePixel;
+//     bgOpaque = bgPixel != 0;
+// }
+//
+// uint8_t PPU::fetchPatternTableLow(uint8_t tile, uint8_t tileX)
+// {
+//     uint16_t fineY = (v >> 12) & 0x07;
+//     uint16_t ptAddr = bgPTAddr + tile * 16 + fineY;
+//     return (read(ptAddr) >> (7 - tileX)) & 0x01;
+// }
+
+// uint8_t PPU::fetchPatternTableHigh(uint8_t tile, uint8_t tileX)
+// {
+//     uint16_t fineY = (v >> 12) & 0x07;
+//     uint16_t ptAddr = bgPTAddr + tile * 16 + fineY + 8;
+//     return (read(ptAddr) >> (7 - tileX)) & 0x01;
+// }
